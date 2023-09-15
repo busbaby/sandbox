@@ -1,0 +1,73 @@
+import argparse
+import os
+import sys
+import cv2
+import re
+import time
+import torch
+
+class VideoUtil:
+    def __init__(self, videoFile):
+        self.cap = cv2.VideoCapture(videoFile)
+        self.model = torch.hub.load('ultralytics/yolov5', 'yolov5s')
+
+    def getFrames(self, max):
+        frames = []
+        while len(frames) < max:
+            success, frame = self.cap.read()
+            if not success:
+                break
+            frames.append(frame)
+        return frames
+
+    def getCrowdDensity(self):
+        readIndex = self.cap.get(cv2.CAP_PROP_POS_FRAMES)
+        success, frame = self.cap.read()
+        if success:
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, readIndex)
+            # may want to resize and grayscale frame to speed up detection
+            detections = self.model(frame)
+            print(type(detections))
+            exit
+        return 0
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--source', action='append', help='Video source directory/file', required=True)
+args = parser.parse_args()
+
+videoUtils = []
+for s in args.source:
+    s = os.path.abspath(s)
+    if not os.path.exists(s):
+        print(f"No such file: {s}", file=sys.stderr)
+        exit(1)
+    elif not re.match('.*.mp4$', s, re.IGNORECASE):
+        print(f"Unsupported file extension: {s}", file=sys.stderr)
+        exit(1)
+    videoUtils.append(VideoUtil(s))
+
+st = time.time()
+FPS = 30
+CHUNKSIZE = FPS * 2 # Read in 2 second chunks
+
+while True:
+    maxDensityIndex = 0
+    maxDensity = 0
+    for index in range(len(videoUtils)):
+        videoUtil = videoUtils[index]
+        density = videoUtil.getCrowdDensity()
+        if density > maxDensity:
+            maxDensity = density
+            maxDensityIndex = index
+    
+    for index in range(len(videoUtils)):
+        videoUtil = videoUtils[index]
+        frames = videoUtil.getFrames(CHUNKSIZE)
+        if index == maxDensityIndex:
+            if not bool(frames):
+                break
+            print(f"Writing from {maxDensityIndex}")
+
+
+elapsed_time = time.time() - st
+print('Execution time:', elapsed_time, 'seconds')
