@@ -6,36 +6,43 @@ import re
 import time
 import torch
 
-class VideoUtil:
+class VideoStream:
     def __init__(self, videoFile):
         self.cap = cv2.VideoCapture(videoFile)
-        self.model = torch.hub.load('ultralytics/yolov5', 'yolov5s')
 
-    def getFrames(self, max):
+    def getFrames(self, count):
         frames = []
-        while len(frames) < max:
-            success, frame = self.cap.read()
-            if not success:
-                break
-            frames.append(frame)
+        if self.cap.isOpened():
+            while count > 0:
+                success, frame = self.cap.read()
+                if not success:
+                    self.cap.release()
+                    break
+                frames.append(frame)
+                count -= 1
         return frames
 
-    def getCrowdDensity(self):
-        readIndex = self.cap.get(cv2.CAP_PROP_POS_FRAMES)
-        success, frame = self.cap.read()
-        if success:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, readIndex)
-            # may want to resize and grayscale frame to speed up detection
-            detections = self.model(frame)
-            print(type(detections))
-            exit
-        return 0
+model = torch.hub.load('ultralytics/yolov5', 'yolov5s')
+model.classes = 0
+
+def getCrowdDensity(frame):
+    # may want to resize and grayscale frame to speed up detection
+    detections = model(frame)
+    rs = detections.pandas().xyxy[0]
+    print(rs)
+    personCount = 0
+    personDensity = 0
+    for index, row in rs.iterrows():
+        if row["class"] == 0:
+                personDensity += ((row["xmax"] - row["xmin"]) * (row["ymax"] - row["ymin"])) * row["confidence"]
+                personCount += 1
+    return personDensity * personCount
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--source', action='append', help='Video source directory/file', required=True)
 args = parser.parse_args()
 
-videoUtils = []
+videoStreams = []
 for s in args.source:
     s = os.path.abspath(s)
     if not os.path.exists(s):
@@ -44,29 +51,30 @@ for s in args.source:
     elif not re.match('.*.mp4$', s, re.IGNORECASE):
         print(f"Unsupported file extension: {s}", file=sys.stderr)
         exit(1)
-    videoUtils.append(VideoUtil(s))
+    videoStreams.append(VideoStream(s))
 
 st = time.time()
 FPS = 30
 CHUNKSIZE = FPS * 2 # Read in 2 second chunks
 
 while True:
-    maxDensityIndex = 0
-    maxDensity = 0
-    for index in range(len(videoUtils)):
-        videoUtil = videoUtils[index]
-        density = videoUtil.getCrowdDensity()
-        if density > maxDensity:
-            maxDensity = density
-            maxDensityIndex = index
-    
-    for index in range(len(videoUtils)):
-        videoUtil = videoUtils[index]
-        frames = videoUtil.getFrames(CHUNKSIZE)
-        if index == maxDensityIndex:
-            if not bool(frames):
-                break
-            print(f"Writing from {maxDensityIndex}")
+    chunks = []
+    maxDensity = -1
+    maxDensityIndex = -1
+    for index in range(len(videoStreams)):
+        frames = videoStreams[index].getFrames(CHUNKSIZE)
+        if len(frames) == CHUNKSIZE:
+            chunks.append(frames)
+            density = getCrowdDensity(frames[0])
+            if density > maxDensity:
+                maxDensity = density
+                maxDensityIndex = index
+            
+    if len(chunks) == 0:
+        break
+    focusedFrames = chunks.pop[maxDensityIndex]
+    # Write focused frames to output video here
+    # Overlay all audio channels from framesSet
 
 
 elapsed_time = time.time() - st
