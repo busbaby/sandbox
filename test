@@ -1,81 +1,197 @@
 import argparse
-import os
 import sys
-import cv2
-import re
 import time
 import torch
+from moviepy.video.io.VideoFileClip import VideoFileClip
+from moviepy.video.io.ffmpeg_writer import FFMPEG_VideoWriter
+from moviepy.audio.io.ffmpeg_audiowriter import FFMPEG_AudioWriter
+from moviepy.audio.io.AudioFileClip import AudioFileClip
+from moviepy.audio.AudioClip import CompositeAudioClip
+from datetime import timedelta
+import os
+import glob
+import atexit
 
-class VideoStream:
+
+SKIPSIZE = 2  # Inspect video every N seconds
+
+
+def make_tmpfile(hint, suffix):
+    return f"tmp_{os.getpid()}.{hint}{suffix}"
+
+
+def exit_handler():
+    for f in glob.glob(f"tmp_{os.getpid()}*"):
+        try:
+            # os.unlink(f)
+            print
+        except Exception:
+            continue
+
+
+atexit.register(exit_handler)
+
+
+class AVStream:
     def __init__(self, videoFile):
-        self.cap = cv2.VideoCapture(videoFile)
+        self.video = VideoFileClip(videoFile)
+        self.audio = self.video.audio.reader
+        self.videoIter = self.video.iter_frames()
+        self.audioIter = self.video.audio.iter_frames()
 
-    def getFrames(self, count):
+    def getVideoFrames(self, count):
         frames = []
-        if self.cap.isOpened():
-            while count > 0:
-                success, frame = self.cap.read()
-                if not success:
-                    self.cap.release()
-                    break
-                frames.append(frame)
-                count -= 1
+        while count > 0:
+            frame = next(self.videoIter, None)
+            if frame is None:
+                self.video.close()
+                break
+            frames.append(frame)
+            count -= 1
         return frames
 
-model = torch.hub.load('ultralytics/yolov5', 'yolov5s')
-model.classes = 0
+    def getAudioFrames(self, count):
+        frames = []
+        while count > 0:
+            frame = next(self.audioIter, None)
+            if frame is None:
+                self.video.close()
+                break
+            frames.append(frame.T)
+            count -= 1
+        return frames
 
-def getCrowdDensity(frame):
-    # may want to resize and grayscale frame to speed up detection
-    detections = model(frame)
-    rs = detections.pandas().xyxy[0]
-    print(rs)
+
+def getCrowdDensity(rs):
     personCount = 0
     personDensity = 0
     for index, row in rs.iterrows():
         if row["class"] == 0:
-                personDensity += ((row["xmax"] - row["xmin"]) * (row["ymax"] - row["ymin"])) * row["confidence"]
-                personCount += 1
-    return personDensity * personCount
+            personDensity += ((row["xmax"] - row["xmin"]) *
+                              (row["ymax"] - row["ymin"])) * row["confidence"]
+            personCount += 1
+    return int(personDensity * personCount)
+
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--source', action='append', help='Video source directory/file', required=True)
+parser.add_argument(
+    '--source', help='Video source file', required=True, type=str, action='append')
+parser.add_argument(
+    '--dest', help='Video destination file', required=True, type=str)
+parser.add_argument(
+    '--duration', help='Stop processing after N seconds', default=(90 * 60), type=int)
 args = parser.parse_args()
 
-videoStreams = []
-for s in args.source:
-    s = os.path.abspath(s)
-    if not os.path.exists(s):
-        print(f"No such file: {s}", file=sys.stderr)
+frame_rate = -1
+frame_width = -1
+frame_height = -1
+sample_rate = -1
+avStreams = []
+for out in args.source:
+    avStream = AVStream(out)
+    if len(avStreams) == 0:
+        frame_rate = avStream.video.fps
+        frame_width, frame_height = avStream.video.size
+        sample_rate = avStream.audio.fps
+        print("frame rate:", frame_rate,
+              "frame width", frame_width,
+              "frame height", frame_height,
+              "sample rate", sample_rate)
+    elif frame_rate != avStream.video.fps:
+        print("Unmatched frame rates", file=sys.stderr)
         exit(1)
-    elif not re.match('.*.mp4$', s, re.IGNORECASE):
-        print(f"Unsupported file extension: {s}", file=sys.stderr)
+    elif [frame_width, frame_height] != avStream.video.size:
+        print("Unmatched frame size", file=sys.stderr)
         exit(1)
-    videoStreams.append(VideoStream(s))
+    elif sample_rate != avStream.audio.fps:
+        print("Unmatched sample rates", file=sys.stderr)
+        exit(1)
+    avStreams.append(avStream)
 
-st = time.time()
-FPS = 30
-CHUNKSIZE = FPS * 2 # Read in 2 second chunks
 
-while True:
-    chunks = []
+videoOut = FFMPEG_VideoWriter(
+    filename=make_tmpfile(0, ".avi"),
+    size=(frame_width, frame_height),
+    fps=frame_rate,
+    codec='libx264',
+    preset='ultrafast',
+    threads=4,
+)
+
+audioOuts = []
+for index, avStream in enumerate(avStreams):
+    audioOuts.append(
+        FFMPEG_AudioWriter(
+            filename=make_tmpfile(index, ".wav"),
+            fps_input=avStream.audio.fps,
+            nbytes=avStream.audio.nbytes,
+            nchannels=avStream.audio.nchannels,
+            codec=avStream.audio.acodec,
+            # bitrate=avStream.audio.,
+        )
+    )
+
+START_TIME = time.time()
+
+MODEL = torch.hub.load('ultralytics/yolov5', 'yolov5s')
+MODEL.classes = 0
+
+duration = 0
+while args.duration > duration:
+    maxDensityFrames = []
     maxDensity = -1
-    maxDensityIndex = -1
-    for index in range(len(videoStreams)):
-        frames = videoStreams[index].getFrames(CHUNKSIZE)
-        if len(frames) == CHUNKSIZE:
-            chunks.append(frames)
-            density = getCrowdDensity(frames[0])
-            if density > maxDensity:
-                maxDensity = density
-                maxDensityIndex = index
-            
-    if len(chunks) == 0:
+    for index, avStream in enumerate(avStreams):
+        frameCount = int(round(avStream.video.fps, 0)) * SKIPSIZE
+        frames = avStream.getVideoFrames(frameCount)
+        if len(frames) != frameCount:
+            print("reached end of video stream", index)
+            continue
+        detections = MODEL(frames[0])
+        rs = detections.pandas().xyxy[0]
+        density = getCrowdDensity(rs)
+        if density > maxDensity:
+            maxDensity = density
+            maxDensityFrames = frames
+
+    if len(maxDensityFrames) == 0:
+        print("reached end of ALL streams")
         break
-    focusedFrames = chunks.pop[maxDensityIndex]
-    # Write focused frames to output video here
-    # Overlay all audio channels from framesSet
 
+    for frame in maxDensityFrames:
+        videoOut.write_frame(frame)
 
-elapsed_time = time.time() - st
-print('Execution time:', elapsed_time, 'seconds')
+    for index, avStream in enumerate(avStreams):
+        frameCount = avStream.audio.fps * SKIPSIZE
+        frames = avStream.getAudioFrames(frameCount)
+        if len(frames) != frameCount:
+            print("reached end of audio stream", index)
+            continue
+        for audio in frames:
+            audioOuts[index].write_frames(audio)
+
+    duration += SKIPSIZE
+
+videoOut.close()
+for out in audioOuts:
+    out.close()
+
+finalVideo = VideoFileClip(videoOut.filename)
+finalAudios = []
+for out in audioOuts:
+    finalAudios.append(AudioFileClip(out.filename))
+finalVideo.audio = CompositeAudioClip(finalAudios)
+finalVideo.audio.duration = finalVideo.duration
+finalVideo.write_videofile(
+    args.dest,
+    fps=30,
+    codec='libx264',
+    audio_codec='libmp3lame',
+    preset='ultrafast',
+    threads=4,
+)
+
+for audio in finalAudios:
+    audio.close()
+finalVideo.close()
+
+print('Execution time:', str(timedelta(seconds=(time.time() - START_TIME))))
