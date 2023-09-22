@@ -6,7 +6,10 @@ from moviepy.video.io.VideoFileClip import VideoFileClip
 from moviepy.video.io.ffmpeg_writer import FFMPEG_VideoWriter
 from moviepy.audio.io.ffmpeg_audiowriter import FFMPEG_AudioWriter
 from moviepy.audio.io.AudioFileClip import AudioFileClip
-from moviepy.audio.AudioClip import CompositeAudioClip
+from moviepy.audio.AudioClip import (
+    CompositeAudioClip,
+    AudioArrayClip
+)
 from datetime import timedelta
 import os
 import glob
@@ -23,8 +26,7 @@ def make_tmpfile(hint, suffix):
 def exit_handler():
     for f in glob.glob(f"tmp_{os.getpid()}*"):
         try:
-            # os.unlink(f)
-            print
+            os.unlink(f)
         except Exception:
             continue
 
@@ -50,16 +52,12 @@ class AVStream:
             count -= 1
         return frames
 
-    def getAudioFrames(self, count):
-        frames = []
-        while count > 0:
-            frame = next(self.audioIter, None)
-            if frame is None:
-                self.video.close()
-                break
-            frames.append(frame.T)
-            count -= 1
-        return frames
+    def getAudioFrames(self, duration):
+        chunk = self.audio.read_chunk(duration * self.audio.fps)
+        if chunk.size != 0:
+            clip = AudioArrayClip(chunk, fps=avStream.audio.fps)
+            chunk = clip.to_soundarray(quantize=True, buffersize=chunk.size)
+        return chunk
 
 
 def getCrowdDensity(rs):
@@ -122,12 +120,9 @@ audioOuts = []
 for index, avStream in enumerate(avStreams):
     audioOuts.append(
         FFMPEG_AudioWriter(
-            filename=make_tmpfile(index, ".wav"),
-            fps_input=avStream.audio.fps,
-            nbytes=avStream.audio.nbytes,
-            nchannels=avStream.audio.nchannels,
-            codec=avStream.audio.acodec,
-            # bitrate=avStream.audio.,
+            filename=make_tmpfile(index, ".mp3"),
+            fps_input=sample_rate,
+            codec="libmp3lame",
         )
     )
 
@@ -137,6 +132,7 @@ MODEL = torch.hub.load('ultralytics/yolov5', 'yolov5s')
 MODEL.classes = 0
 
 duration = 0
+timePos = 0
 while args.duration > duration:
     maxDensityFrames = []
     maxDensity = -1
@@ -161,13 +157,8 @@ while args.duration > duration:
         videoOut.write_frame(frame)
 
     for index, avStream in enumerate(avStreams):
-        frameCount = avStream.audio.fps * SKIPSIZE
-        frames = avStream.getAudioFrames(frameCount)
-        if len(frames) != frameCount:
-            print("reached end of audio stream", index)
-            continue
-        for audio in frames:
-            audioOuts[index].write_frames(audio)
+        chunk = avStream.getAudioFrames(SKIPSIZE)
+        audioOuts[index].write_frames(chunk)
 
     duration += SKIPSIZE
 
@@ -183,10 +174,9 @@ finalVideo.audio = CompositeAudioClip(finalAudios)
 finalVideo.audio.duration = finalVideo.duration
 finalVideo.write_videofile(
     args.dest,
-    fps=30,
     codec='libx264',
     audio_codec='libmp3lame',
-    preset='ultrafast',
+    preset='veryfast',
     threads=4,
 )
 
