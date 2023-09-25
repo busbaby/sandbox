@@ -1,7 +1,6 @@
 from moviepy.editor import *
 import argparse
 from pathlib import Path
-import json
 
 
 argParser = argparse.ArgumentParser()
@@ -18,13 +17,11 @@ args = argParser.parse_args()
 
 target_dir = Path(args.dir)
 if not target_dir.exists():
-    print("The target directory doesn't exist")
-    raise SystemExit(1)
+    raise SystemExit(f"The target directory '{target_dir}' doesn't exist")
 
 inputClips = [VideoFileClip(str(f.absolute())) for f in target_dir.iterdir()]
 if len(inputClips) < 2:
-    print("Need 2 or more files to merge")
-    exit(1)
+    raise SystemExit("Need 2 or more files to merge")
 
 if args.starttime is not None:
     firstFile = inputClips[0]
