@@ -15,6 +15,15 @@ from moviepy.audio.AudioClip import (
     AudioArrayClip
 )
 
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    '--source', help='Video source file', required=True, type=str, action='append')
+parser.add_argument(
+    '--dest', help='Video destination file', required=True, type=str)
+parser.add_argument(
+    '--duration', help='Stop processing after N seconds', default=(90 * 60), type=int)
+args = parser.parse_args()
+
 
 def make_tmpfile(hint, suffix):
     return f"tmp_{os.getpid()}.{hint}{suffix}"
@@ -63,7 +72,7 @@ class VideoReader:
 
 
 MODEL = torch.hub.load('ultralytics/yolov5', 'yolov5s')
-MODEL.classes = 0, 7 # 0:person, 7:truck/zamboni
+MODEL.classes = 0, 7  # 0:person, 7:truck/zamboni
 
 
 class ImageAnalysis:
@@ -89,46 +98,12 @@ def analyzeImage(image):
     return ImageAnalysis(personCount, personDensity, truckCount)
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument(
-    '--source', help='Video source file', required=True, type=str, action='append')
-parser.add_argument(
-    '--dest', help='Video destination file', required=True, type=str)
-parser.add_argument(
-    '--duration', help='Stop processing after N seconds', default=(90 * 60), type=int)
-args = parser.parse_args()
-
-frame_rate = -1
-frame_width = -1
-frame_height = -1
-sample_rate = -1
-sources = []
-for source in args.source:
-    input = VideoReader(source)
-    if len(sources) == 0:
-        frame_rate = input.video.fps
-        frame_width, frame_height = input.video.size
-        sample_rate = input.audio.fps
-        print("frame rate:", frame_rate,
-              "frame width", frame_width,
-              "frame height", frame_height,
-              "sample rate", sample_rate)
-    elif frame_rate != input.video.fps:
-        print("Unmatched frame rates", file=sys.stderr)
-        exit(1)
-    elif [frame_width, frame_height] != input.video.size:
-        print("Unmatched frame size", file=sys.stderr)
-        exit(1)
-    elif sample_rate != input.audio.fps:
-        print("Unmatched sample rates", file=sys.stderr)
-        exit(1)
-    sources.append(input)
-
+sources = [VideoReader(x) for x in args.source]
 
 videoOut = FFMPEG_VideoWriter(
     filename=make_tmpfile(0, ".avi"),
-    size=(frame_width, frame_height),
-    fps=frame_rate,
+    size=(1920, 1080),
+    fps=30,
     codec='libx264',
     preset='ultrafast',
     threads=4,
@@ -137,7 +112,7 @@ videoOut = FFMPEG_VideoWriter(
 audioOuts = [
     FFMPEG_AudioWriter(
         filename=make_tmpfile(index, ".mp3"),
-        fps_input=sample_rate,
+        fps_input=44100,
         codec="libmp3lame",
     )
     for index in range(len(sources))
